@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Illinois Block I">
+  <rect width="64" height="64" rx="12" fill="#ffffff"/>
+  <path fill="#13294b" d="M14 6h36v17h-9v18h9v17H14V41h9V23h-9z"/>
+  <path fill="#ff5f05" d="M19 11h26v7h-9v28h9v7H19v-7h9V18h-9z"/>
+</svg>
