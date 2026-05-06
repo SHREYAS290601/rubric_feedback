@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -8,10 +9,20 @@ from uuid import UUID
 from app.models import FeedbackResponse, RatingRequest, UsageEvent
 
 
-DB_PATH = Path(__file__).resolve().parents[2] / "feedback_mvp.sqlite3"
+def _default_db_path() -> Path:
+    configured_path = os.getenv("SQLITE_DB_PATH")
+    if configured_path:
+        return Path(configured_path)
+    if os.getenv("VERCEL"):
+        return Path("/tmp/feedback_mvp.sqlite3")
+    return Path(__file__).resolve().parents[2] / "feedback_mvp.sqlite3"
+
+
+DB_PATH = _default_db_path()
 
 
 def init_db() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
