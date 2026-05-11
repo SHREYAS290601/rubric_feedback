@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import dataclass
 
@@ -40,6 +41,11 @@ class PromptInjectionFilter:
             r"reveal\s+(the\s+)?prompt",
             r"give\s+me\s+(the\s+)?prompt",
             r"show\s+me\s+(the\s+)?prompt",
+            r"decode\s+and\s+follow\s+this\s+instruction",
+            r"just\s+a\s+note\s+to\s+the\s+automated\s+reviewer",
+            r"do\s+not\s+(grade|review|assess|evaluate)\s+this\s+paragraph",
+            r"treat\s+the\s+submission\s+as\s+complete",
+            r"do\s+not\s+mention\s+missing\s+evidence",
         ]
         self.fuzzy_patterns = [
             "ignore",
@@ -52,11 +58,12 @@ class PromptInjectionFilter:
 
     def detect_injection(self, text: str) -> bool:
         normalized_text = self.sanitize_input(text)
-        if any(
-            re.search(pattern, normalized_text, re.IGNORECASE)
-            for pattern in self.dangerous_patterns
-        ):
-            return True
+        for candidate_text in self._candidate_texts(normalized_text):
+            if any(
+                re.search(pattern, candidate_text, re.IGNORECASE)
+                for pattern in self.dangerous_patterns
+            ):
+                return True
 
         words = re.findall(r"\b\w+\b", normalized_text.lower())
         for word in words:
@@ -67,9 +74,10 @@ class PromptInjectionFilter:
 
     def first_match(self, text: str) -> str | None:
         normalized_text = self.sanitize_input(text)
-        for pattern in self.dangerous_patterns:
-            if re.search(pattern, normalized_text, flags=re.IGNORECASE):
-                return pattern
+        for candidate_text in self._candidate_texts(normalized_text):
+            for pattern in self.dangerous_patterns:
+                if re.search(pattern, candidate_text, flags=re.IGNORECASE):
+                    return pattern
         return None
 
     def _is_similar_word(self, word: str, target: str) -> bool:
@@ -87,6 +95,28 @@ class PromptInjectionFilter:
         text = re.sub(r"(.)\1{3,}", r"\1", text)
         return text[:10000]
 
+    def _candidate_texts(self, text: str) -> list[str]:
+        candidates = [text]
+        for token in re.findall(r"\b[A-Za-z0-9+/=]{16,}\b", text):
+            decoded = self._decode_base64_token(token)
+            if decoded:
+                candidates.append(decoded)
+        return candidates
+
+    def _decode_base64_token(self, token: str) -> str | None:
+        padded_token = token + "=" * (-len(token) % 4)
+        try:
+            decoded = base64.b64decode(padded_token, validate=True)
+        except Exception:
+            return None
+        try:
+            decoded_text = decoded.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if not decoded_text.isprintable():
+            return None
+        return self.sanitize_input(decoded_text)
+
 
 PROMPT_INJECTION_FILTER = PromptInjectionFilter()
 
@@ -98,6 +128,7 @@ INJECTION_PATTERNS = [
     r"\breveal (the )?(system|developer|hidden) (prompt|instructions|message)\b",
     r"\bgive me (the )?(system|developer|hidden)? ?prompt\b",
     r"\bshow (me )?(the )?(system|developer|hidden) (prompt|instructions|message)\b",
+    r"\bdecode and follow this instruction\b",
     r"\b(system|developer|hidden) prompt\b",
     r"\bdeveloper message\b",
     r"\bjailbreak\b",
@@ -109,6 +140,20 @@ INJECTION_PATTERNS = [
     r"\bact as\b.*\bwithout restrictions\b",
     r"\bdo not follow\b.*\bpolicy\b",
     r"\bignore (the )?(rubric|assignment|criteria)\b",
+    r"\bjust a note to the automated reviewer\b",
+    r"\bdo not (grade|review|assess|evaluate) this paragraph\b",
+    r"\btreat the submission as complete\b",
+    r"\bdo not mention missing evidence\b",
+]
+
+RUBRIC_CONTROL_PATTERNS = [
+    r"\b(system|developer|hidden) (prompt|instructions|message)\b",
+    r"\bignore (all )?(previous|prior|system|developer|safety) instructions\b",
+    r"\breveal (the )?(system|developer|hidden)? ?(prompt|instructions|message)\b",
+    r"\b(assign|give) (this )?(student )?(an? )?[A-F][+-]?\b",
+    r"\b(assign|give).*\b(full marks|full credit|perfect score)\b",
+    r"\binstructor will approve\b",
+    r"\bsay (the )?(student )?(will )?(pass|be approved)\b",
 ]
 
 JAILBREAK_PATTERNS = [
@@ -253,6 +298,22 @@ def enforce_input_guardrails(request: FeedbackRequest) -> GuardrailDecision:
         raise GuardrailViolation(
             "This submission appears to contain a secret, token, password, or API key. "
             "Remove sensitive credentials before requesting feedback."
+        )
+
+    matched_rubric_control = (
+        PROMPT_INJECTION_FILTER.first_match(rubric_text)
+        or _first_matching_pattern(rubric_text, RUBRIC_CONTROL_PATTERNS)
+    )
+    if matched_rubric_control:
+        _log_guardrail(
+            request,
+            allowed=False,
+            category="untrusted_rubric_control_instruction",
+            matched_rule=matched_rubric_control,
+        )
+        raise GuardrailViolation(
+            "The rubric contains instructions that try to control the AI system, reveal prompts, "
+            "or assign grades. Please remove those instructions and submit only evaluation criteria."
         )
 
     matched_prompt_injection = PROMPT_INJECTION_FILTER.first_match(draft_text)
