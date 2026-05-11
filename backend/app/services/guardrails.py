@@ -30,10 +30,73 @@ class GuardrailDecision:
     matched_rule: str | None = None
 
 
+class PromptInjectionFilter:
+    def __init__(self) -> None:
+        self.dangerous_patterns = [
+            r"ignore\s+(all\s+)?previous\s+instructions?",
+            r"forget\s+(everything|all|the\s+above|previous\s+instructions?)",
+            r"you\s+are\s+now\s+(in\s+)?developer\s+mode",
+            r"system\s+override",
+            r"reveal\s+(the\s+)?prompt",
+            r"give\s+me\s+(the\s+)?prompt",
+            r"show\s+me\s+(the\s+)?prompt",
+        ]
+        self.fuzzy_patterns = [
+            "ignore",
+            "bypass",
+            "override",
+            "reveal",
+            "delete",
+            "system",
+        ]
+
+    def detect_injection(self, text: str) -> bool:
+        normalized_text = self.sanitize_input(text)
+        if any(
+            re.search(pattern, normalized_text, re.IGNORECASE)
+            for pattern in self.dangerous_patterns
+        ):
+            return True
+
+        words = re.findall(r"\b\w+\b", normalized_text.lower())
+        for word in words:
+            for pattern in self.fuzzy_patterns:
+                if self._is_similar_word(word, pattern):
+                    return True
+        return False
+
+    def first_match(self, text: str) -> str | None:
+        normalized_text = self.sanitize_input(text)
+        for pattern in self.dangerous_patterns:
+            if re.search(pattern, normalized_text, flags=re.IGNORECASE):
+                return pattern
+        return None
+
+    def _is_similar_word(self, word: str, target: str) -> bool:
+        if len(word) != len(target) or len(word) < 3:
+            return False
+        return (
+            word != target
+            and word[0] == target[0]
+            and word[-1] == target[-1]
+            and sorted(word[1:-1]) == sorted(target[1:-1])
+        )
+
+    def sanitize_input(self, text: str) -> str:
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"(.)\1{3,}", r"\1", text)
+        return text[:10000]
+
+
+PROMPT_INJECTION_FILTER = PromptInjectionFilter()
+
+
 INJECTION_PATTERNS = [
     r"\bignore (all )?(previous|prior|above|system|developer) instructions\b",
+    r"\bforget (everything|all|the above|previous instructions?)\b",
     r"\b(disregard|override|bypass) (the )?(system|developer|safety|instructions|rules)\b",
     r"\breveal (the )?(system|developer|hidden) (prompt|instructions|message)\b",
+    r"\bgive me (the )?(system|developer|hidden)? ?prompt\b",
     r"\bshow (me )?(the )?(system|developer|hidden) (prompt|instructions|message)\b",
     r"\b(system|developer|hidden) prompt\b",
     r"\bdeveloper message\b",
@@ -190,6 +253,19 @@ def enforce_input_guardrails(request: FeedbackRequest) -> GuardrailDecision:
         raise GuardrailViolation(
             "This submission appears to contain a secret, token, password, or API key. "
             "Remove sensitive credentials before requesting feedback."
+        )
+
+    matched_prompt_injection = PROMPT_INJECTION_FILTER.first_match(draft_text)
+    if matched_prompt_injection or PROMPT_INJECTION_FILTER.detect_injection(draft_text):
+        _log_guardrail(
+            request,
+            allowed=False,
+            category="prompt_injection_or_jailbreak",
+            matched_rule=matched_prompt_injection or "typoglycemia_prompt_injection",
+        )
+        raise GuardrailViolation(
+            "This submission contains prompt-injection or jailbreak language. "
+            "Please remove instructions aimed at the AI system and submit only the student draft and rubric."
         )
 
     has_writing_context = any(signal in combined_text for signal in WRITING_SIGNALS)
